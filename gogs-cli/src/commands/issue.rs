@@ -91,14 +91,29 @@ async fn handle_list_all(
 ) -> Result<()> {
     let repos = client.list_user_repos().await?;
 
-    let mut all_issues = Vec::new();
+    // Spawn parallel tasks for each repo
+    let state = state.to_string();
+    let handles: Vec<_> = repos
+        .into_iter()
+        .map(|repo| {
+            let client = client.clone();
+            let state = state.clone();
+            let full_name = repo.full_name.clone();
 
-    for repo in repos {
-        match client
-            .list_issues(&repo.owner.username, &repo.name, state)
-            .await
-        {
-            Ok(mut issues) => {
+            tokio::spawn(async move {
+                let result = client
+                    .list_issues(&repo.owner.username, &repo.name, &state)
+                    .await;
+                (full_name, result)
+            })
+        })
+        .collect();
+
+    // Collect results
+    let mut all_issues = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok((repo_name, Ok(mut issues))) => {
                 // Filter by labels if specified
                 if !labels.is_empty() {
                     issues.retain(|issue| {
@@ -107,13 +122,19 @@ async fn handle_list_all(
                         })
                     });
                 }
-                all_issues.push((repo.full_name, issues));
+                all_issues.push((repo_name, issues));
+            }
+            Ok((repo_name, Err(e))) => {
+                eprintln!("Warning: Failed to list issues for {}: {}", repo_name, e);
             }
             Err(e) => {
-                eprintln!("Warning: Failed to list issues for {}: {}", repo.full_name, e);
+                eprintln!("Warning: Task failed: {}", e);
             }
         }
     }
+
+    // Sort by repo name for consistent output
+    all_issues.sort_by(|a, b| a.0.cmp(&b.0));
 
     let output = format_issue_list(all_issues, format);
     print!("{}", output);
